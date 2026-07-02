@@ -9,6 +9,7 @@ from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, ReplyKey
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -122,12 +123,31 @@ async def get_sphere(message: Message, state: FSMContext):
     save_data(registrations)
 
     await message.answer(
-        f"✅ Вы зарегистрированы!\n\n"
-        f"Мероприятие:\n{event['title']}\n\n"
-        f"📅 {event['date']}\n"
-        f"🕕 {event['time']}\n\n"
-        f"За день и за час до начала мы отправим вам напоминание."
-    )
+       builder = InlineKeyboardBuilder()
+
+builder.button(
+    text="💬 Чат участников",
+    url="https://t.me/+vyrw8Q-AnAlkYWVi"
+)
+
+builder.button(
+    text="📢 Канал сообщества",
+    url="https://t.me/voice_clubbbb"
+)
+
+builder.adjust(1)
+
+await message.answer(
+    f"🎉 <b>Регистрация подтверждена!</b>\n\n"
+    f"Вы записаны на:\n\n"
+    f"<b>{event['title']}</b>\n\n"
+    f"📅 <b>{event['date']}</b>\n"
+    f"🕕 <b>{event['time']}</b>\n\n"
+    f"За сутки и за час до начала мы пришлем вам напоминание.\n\n"
+    f"До встречи на мероприятии! 🚀",
+    parse_mode="HTML",
+    reply_markup=builder.as_markup()
+)
 
     for admin_id in ADMIN_IDS:
         await bot.send_message(
