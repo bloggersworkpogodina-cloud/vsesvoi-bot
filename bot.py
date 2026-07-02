@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
@@ -23,7 +23,6 @@ EVENTS = {
         "date": "10 июля",
         "time": "18:00 МСК",
         "description": "200 предпринимателей, экспертов и руководителей. Живое общение, новые связи, партнёрства и клиенты.",
-        "link": "Ссылка на эфир будет отправлена перед началом."
     }
 }
 
@@ -62,17 +61,16 @@ async def start(message: Message, state: FSMContext):
     event = EVENTS[event_id]
     await state.update_data(event_id=event_id)
 
-    text = (
+    await message.answer(
         f"👋 Добро пожаловать!\n\n"
         f"Вы регистрируетесь на мероприятие:\n\n"
-        f"**{event['title']}**\n\n"
+        f"<b>{event['title']}</b>\n\n"
         f"📅 {event['date']}\n"
         f"🕕 {event['time']}\n\n"
         f"{event['description']}\n\n"
-        f"Чтобы зарегистрироваться, напишите ваше имя."
+        f"Чтобы зарегистрироваться, напишите ваше имя.",
+        parse_mode="HTML"
     )
-
-    await message.answer(text, parse_mode="Markdown")
     await state.set_state(Register.name)
 
 
@@ -122,32 +120,22 @@ async def get_sphere(message: Message, state: FSMContext):
 
     save_data(registrations)
 
-builder = InlineKeyboardBuilder()
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💬 Чат участников", url="https://t.me/+vyrw8Q-AnAlkYWVi")
+    builder.button(text="📢 Канал сообщества", url="https://t.me/voice_clubbbb")
+    builder.adjust(1)
 
-builder.button(
-text="💬 Чат участников",
-url="https://t.me/+vyrw8Q-AnAlkYWVi"
-)
-
-builder.button(
-text="📢 Канал сообщества",
-url="https://t.me/voice_clubbbb"
-)
-
-builder.adjust(1)
-
-await message.answer(
-    f"🎉 <b>Регистрация подтверждена!</b>\n\n"
-    f"Вы записаны на:\n\n"
-    f"<b>{event['title']}</b>\n\n"
-    f"📅 <b>{event['date']}</b>\n"
-    f"🕕 <b>{event['time']}</b>\n\n"
-    f"За сутки и за час до начала мы пришлем вам напоминание.\n\n"
-    f"До встречи на мероприятии! 🚀",
-    parse_mode="HTML",
-    reply_markup=builder.as_markup()
-)
-)
+    await message.answer(
+        f"🎉 <b>Регистрация подтверждена!</b>\n\n"
+        f"Вы записаны на:\n\n"
+        f"<b>{event['title']}</b>\n\n"
+        f"📅 <b>{event['date']}</b>\n"
+        f"🕕 <b>{event['time']}</b>\n\n"
+        f"За сутки и за час до начала мы пришлем вам напоминание.\n\n"
+        f"До встречи на мероприятии! 🚀",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
 
     for admin_id in ADMIN_IDS:
         await bot.send_message(
