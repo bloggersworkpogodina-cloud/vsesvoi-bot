@@ -122,8 +122,7 @@ async def get_sphere(message: Message, state: FSMContext):
 
     save_data(registrations)
 
-    await message.answer(
-       builder = InlineKeyboardBuilder()
+   builder = InlineKeyboardBuilder()
 
 builder.button(
     text="💬 Чат участников",
@@ -147,6 +146,7 @@ await message.answer(
     f"До встречи на мероприятии! 🚀",
     parse_mode="HTML",
     reply_markup=builder.as_markup()
+)
 )
 
     for admin_id in ADMIN_IDS:
