@@ -122,16 +122,16 @@ async def get_sphere(message: Message, state: FSMContext):
 
     save_data(registrations)
 
-   builder = InlineKeyboardBuilder()
+builder = InlineKeyboardBuilder()
 
 builder.button(
-    text="💬 Чат участников",
-    url="https://t.me/+vyrw8Q-AnAlkYWVi"
+text="💬 Чат участников",
+url="https://t.me/+vyrw8Q-AnAlkYWVi"
 )
 
 builder.button(
-    text="📢 Канал сообщества",
-    url="https://t.me/voice_clubbbb"
+text="📢 Канал сообщества",
+url="https://t.me/voice_clubbbb"
 )
 
 builder.adjust(1)
