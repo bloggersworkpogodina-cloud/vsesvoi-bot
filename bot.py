@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import hashlib
 
 import psycopg2
 from psycopg2.extras import Json
@@ -44,6 +45,22 @@ def empty_data():
     return {"events": {}, "registrations": [], "consents": [], "deleted": []}
 
 
+def is_safe_token(value: str) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    if len(value.encode("utf-8")) > 50:
+        return False
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+    return all(ch in allowed for ch in value)
+
+
+def make_link_id(event_id: str) -> str:
+    # Telegram deep-link start parameters and callback_data must be short ASCII.
+    # Old event IDs could contain Cyrillic/title text, so we create a stable safe alias.
+    digest = hashlib.md5(str(event_id).encode("utf-8")).hexdigest()[:10]
+    return f"ev_{digest}"
+
+
 def normalize_data(data):
     if not isinstance(data, dict):
         data = empty_data()
@@ -51,7 +68,32 @@ def normalize_data(data):
     data.setdefault("registrations", [])
     data.setdefault("consents", [])
     data.setdefault("deleted", [])
+
+    # Add safe link_id to every event. This fixes old events with Cyrillic/long IDs.
+    for event_id, event in list(data["events"].items()):
+        if not isinstance(event, dict):
+            data["events"][event_id] = event = {}
+        current = event.get("link_id")
+        if not is_safe_token(current):
+            event["link_id"] = event_id if is_safe_token(event_id) else make_link_id(event_id)
     return data
+
+
+def resolve_event_id(data, token: str):
+    if token in data.get("events", {}):
+        return token
+    for event_id, event in data.get("events", {}).items():
+        if event.get("link_id") == token:
+            return event_id
+    return None
+
+
+def event_token(data, event_id: str) -> str:
+    event = data.get("events", {}).get(event_id, {})
+    token = event.get("link_id")
+    if is_safe_token(token):
+        return token
+    return event_id if is_safe_token(event_id) else make_link_id(event_id)
 
 
 def pg_connect():
@@ -81,9 +123,17 @@ def init_db():
                             initial = normalize_data(json.load(f))
                     except Exception:
                         initial = empty_data()
+                initial = normalize_data(initial)
                 cur.execute(
                     "INSERT INTO app_state (id, data) VALUES (1, %s)",
                     (Json(initial),),
+                )
+            else:
+                # One-time safe migration: add link_id to existing events if missing.
+                migrated = normalize_data(row[0])
+                cur.execute(
+                    "UPDATE app_state SET data = %s, updated_at = NOW() WHERE id = 1",
+                    (Json(migrated),),
                 )
         conn.commit()
 
@@ -134,8 +184,9 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
-def event_link(event_id: str) -> str:
-    return f"https://t.me/{BOT_USERNAME}?start={event_id}"
+def event_link(event_id: str, data=None) -> str:
+    token = event_token(data, event_id) if data else (event_id if is_safe_token(event_id) else make_link_id(event_id))
+    return f"https://t.me/{BOT_USERNAME}?start={token}"
 
 
 def event_regs(data, event_id):
@@ -158,7 +209,7 @@ def events_kb(data):
     active_events = [(eid, e) for eid, e in data["events"].items() if e.get("status", "open") != "archived"]
     for eid, e in active_events:
         count = len(event_regs(data, eid))
-        kb.button(text=f"🟢 {e.get('title','Без названия')} • 👥 {count}", callback_data=f"event:view:{eid}")
+        kb.button(text=f"🟢 {e.get('title','Без названия')} • 👥 {count}", callback_data=f"event:view:{event_token(data, eid)}")
     kb.button(text="📂 Архив", callback_data="events:archive")
     kb.button(text="🏠 Главная", callback_data="crm:home")
     kb.adjust(1)
@@ -186,38 +237,41 @@ def event_card_text(data, event_id):
     )
 
 
-def event_card_kb(event_id):
+def event_card_kb(event_id, data=None):
     kb = InlineKeyboardBuilder()
-    kb.button(text="👥 Участники", callback_data=f"event:participants:{event_id}")
-    kb.button(text="📢 Рассылка", callback_data=f"event:broadcast:{event_id}")
-    kb.button(text="⚙️ Управление", callback_data=f"event:manage:{event_id}")
+    token = event_token(data, event_id) if data else (event_id if is_safe_token(event_id) else make_link_id(event_id))
+    kb.button(text="👥 Участники", callback_data=f"event:participants:{token}")
+    kb.button(text="📢 Рассылка", callback_data=f"event:broadcast:{token}")
+    kb.button(text="⚙️ Управление", callback_data=f"event:manage:{token}")
     kb.button(text="⬅️ Назад", callback_data="crm:events")
     kb.button(text="🏠 Главная", callback_data="crm:home")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def manage_kb(event_id):
+def manage_kb(event_id, data=None):
     kb = InlineKeyboardBuilder()
-    kb.button(text="✏️ Изменить", callback_data=f"manage:edit:{event_id}")
-    kb.button(text="🖼 Афиша", callback_data=f"manage:poster:{event_id}")
-    kb.button(text="🔗 Ссылка регистрации", callback_data=f"manage:link:{event_id}")
-    kb.button(text="🟢 Статус регистрации", callback_data=f"manage:status:{event_id}")
-    kb.button(text="📋 Дублировать", callback_data=f"manage:duplicate:{event_id}")
-    kb.button(text="🗄 Архивировать", callback_data=f"manage:archive:{event_id}")
-    kb.button(text="⬅️ Назад", callback_data=f"event:view:{event_id}")
+    token = event_token(data, event_id) if data else (event_id if is_safe_token(event_id) else make_link_id(event_id))
+    kb.button(text="✏️ Изменить", callback_data=f"manage:edit:{token}")
+    kb.button(text="🖼 Афиша", callback_data=f"manage:poster:{token}")
+    kb.button(text="🔗 Ссылка регистрации", callback_data=f"manage:link:{token}")
+    kb.button(text="🟢 Статус регистрации", callback_data=f"manage:status:{token}")
+    kb.button(text="📋 Дублировать", callback_data=f"manage:duplicate:{token}")
+    kb.button(text="🗄 Архивировать", callback_data=f"manage:archive:{token}")
+    kb.button(text="⬅️ Назад", callback_data=f"event:view:{token}")
     kb.button(text="🏠 Главная", callback_data="crm:home")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def docs_kb(event_id):
+def docs_kb(event_id, data=None):
     kb = InlineKeyboardBuilder()
+    token = event_token(data, event_id) if data else (event_id if is_safe_token(event_id) else make_link_id(event_id))
     kb.button(text="📄 Пользовательское соглашение", callback_data="doc:agreement")
     kb.button(text="📄 Политика обработки ПД", callback_data="doc:policy")
     kb.button(text="📄 Согласие на обработку ПД", callback_data="doc:consent_pd")
     kb.button(text="📄 Согласие на инфо и рекламные сообщения", callback_data="doc:consent_news")
-    kb.button(text="✅ Ознакомился и принимаю условия", callback_data=f"legal:accept:{event_id}")
+    kb.button(text="✅ Ознакомился и принимаю условия", callback_data=f"legal:accept:{token}")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -312,9 +366,10 @@ async def start(message: Message, state: FSMContext):
             return await send_home(message)
         return await message.answer("Добро пожаловать! Для регистрации используйте ссылку на конкретное мероприятие.")
 
-    event_id = args[1]
+    token = args[1]
     data = load_data()
-    event = data["events"].get(event_id)
+    event_id = resolve_event_id(data, token)
+    event = data["events"].get(event_id) if event_id else None
     if not event:
         return await message.answer("Мероприятие не найдено. Проверьте ссылку.")
     if event.get("status") in ["closed", "paused", "archived"]:
@@ -327,7 +382,7 @@ async def start(message: Message, state: FSMContext):
         "Мы бережно относимся к вашим персональным данным и используем их только для организации мероприятий сообщества «Все свои».\n\n"
         "Нажимая кнопку «Ознакомился и принимаю условия», вы подтверждаете, что ознакомились со всеми указанными документами и принимаете их условия.",
         parse_mode="HTML",
-        reply_markup=docs_kb(event_id),
+        reply_markup=docs_kb(event_id, data),
     )
 
 
@@ -340,8 +395,12 @@ async def show_doc(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("legal:accept:"))
 async def accept_legal(call: CallbackQuery, state: FSMContext):
-    event_id = call.data.split(":", 2)[2]
+    token = call.data.split(":", 2)[2]
     data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        await call.message.answer("Мероприятие не найдено. Попробуйте открыть ссылку регистрации заново.")
+        return await call.answer()
     data["consents"].append({
         "telegram_id": call.from_user.id,
         "telegram_username": call.from_user.username,
@@ -505,9 +564,7 @@ async def new_chat(message: Message, state: FSMContext):
 async def new_channel(message: Message, state: FSMContext):
     st = await state.get_data()
     data = load_data()
-    base = st["title"].lower().replace(" ", "_")[:20]
-    safe = "".join(ch for ch in base if ch.isalnum() or ch == "_") or "event"
-    event_id = f"{safe}_{int(datetime.now(TZ).timestamp())}"
+    event_id = f"ev_{int(datetime.now(TZ).timestamp())}"
     data["events"][event_id] = {
         "title": st["title"],
         "date": st["date"],
@@ -516,31 +573,38 @@ async def new_channel(message: Message, state: FSMContext):
         "chat_url": st.get("chat_url", ""),
         "channel_url": "" if message.text.strip() == "-" else message.text.strip(),
         "status": "open",
+        "link_id": event_id,
         "created_at": now_str(),
     }
     save_data(data)
     await message.answer(
         f"✅ <b>Мероприятие создано</b>\n\n"
         f"📅 {st['title']}\n\n"
-        f"🔗 Ссылка регистрации:\n{event_link(event_id)}",
+        f"🔗 Ссылка регистрации:\n{event_link(event_id, data)}",
         parse_mode="HTML",
     )
-    await message.answer(event_card_text(data, event_id), parse_mode="HTML", reply_markup=event_card_kb(event_id))
+    await message.answer(event_card_text(data, event_id), parse_mode="HTML", reply_markup=event_card_kb(event_id, data))
     await state.clear()
 
 
 @dp.callback_query(F.data.startswith("event:view:"))
 async def cb_event_view(call: CallbackQuery):
-    event_id = call.data.split(":", 2)[2]
+    token = call.data.split(":", 2)[2]
     data = load_data()
-    await call.message.answer(event_card_text(data, event_id), parse_mode="HTML", reply_markup=event_card_kb(event_id))
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+    await call.message.answer(event_card_text(data, event_id), parse_mode="HTML", reply_markup=event_card_kb(event_id, data))
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("event:participants:"))
 async def cb_participants(call: CallbackQuery):
-    event_id = call.data.split(":", 2)[2]
+    token = call.data.split(":", 2)[2]
     data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
     regs = event_regs(data, event_id)
     if not regs:
         text = "👥 Пока нет участников."
@@ -552,7 +616,7 @@ async def cb_participants(call: CallbackQuery):
             lines.append("\nПоказаны первые 30 участников.")
         text = "\n\n".join(lines)
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data=f"event:view:{event_id}")
+    kb.button(text="⬅️ Назад", callback_data=f"event:view:{event_token(data, event_id)}")
     kb.button(text="🏠 Главная", callback_data="crm:home")
     kb.adjust(1)
     await call.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
@@ -561,26 +625,39 @@ async def cb_participants(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("event:manage:"))
 async def cb_manage(call: CallbackQuery):
-    event_id = call.data.split(":", 2)[2]
-    await call.message.answer("⚙️ <b>Управление мероприятием</b>", parse_mode="HTML", reply_markup=manage_kb(event_id))
+    token = call.data.split(":", 2)[2]
+    data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+    await call.message.answer("⚙️ <b>Управление мероприятием</b>", parse_mode="HTML", reply_markup=manage_kb(event_id, data))
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("manage:link:"))
 async def cb_link(call: CallbackQuery):
-    event_id = call.data.split(":", 2)[2]
-    await call.message.answer(f"🔗 <b>Ссылка регистрации</b>\n\n{event_link(event_id)}", parse_mode="HTML")
+    token = call.data.split(":", 2)[2]
+    data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+    await call.message.answer(f"🔗 <b>Ссылка регистрации</b>\n\n{event_link(event_id, data)}", parse_mode="HTML")
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("manage:status:"))
 async def cb_status(call: CallbackQuery):
-    event_id = call.data.split(":", 2)[2]
+    token = call.data.split(":", 2)[2]
+    data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+    token = event_token(data, event_id)
     kb = InlineKeyboardBuilder()
-    kb.button(text="🟢 Открыта", callback_data=f"status:set:{event_id}:open")
-    kb.button(text="🟡 Приостановлена", callback_data=f"status:set:{event_id}:paused")
-    kb.button(text="🔴 Закрыта", callback_data=f"status:set:{event_id}:closed")
-    kb.button(text="⬅️ Назад", callback_data=f"event:manage:{event_id}")
+    kb.button(text="🟢 Открыта", callback_data=f"status:set:{token}:open")
+    kb.button(text="🟡 Приостановлена", callback_data=f"status:set:{token}:paused")
+    kb.button(text="🔴 Закрыта", callback_data=f"status:set:{token}:closed")
+    kb.button(text="⬅️ Назад", callback_data=f"event:manage:{token}")
     kb.adjust(1)
     await call.message.answer("Выберите статус регистрации:", reply_markup=kb.as_markup())
     await call.answer()
@@ -588,21 +665,24 @@ async def cb_status(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("status:set:"))
 async def cb_set_status(call: CallbackQuery):
-    _, _, event_id, status = call.data.split(":", 3)
+    _, _, token, status = call.data.split(":", 3)
     data = load_data()
-    if event_id in data["events"]:
-        data["events"][event_id]["status"] = status
-        save_data(data)
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+    data["events"][event_id]["status"] = status
+    save_data(data)
     await call.message.answer("Статус обновлен.")
-    await call.message.answer(event_card_text(data, event_id), parse_mode="HTML", reply_markup=event_card_kb(event_id))
+    await call.message.answer(event_card_text(data, event_id), parse_mode="HTML", reply_markup=event_card_kb(event_id, data))
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("manage:archive:"))
 async def cb_archive(call: CallbackQuery):
-    event_id = call.data.split(":", 2)[2]
+    token = call.data.split(":", 2)[2]
     data = load_data()
-    if event_id in data["events"]:
+    event_id = resolve_event_id(data, token)
+    if event_id:
         data["events"][event_id]["status"] = "archived"
         save_data(data)
     await call.message.answer("🗄 Мероприятие отправлено в архив.")
@@ -611,19 +691,21 @@ async def cb_archive(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("manage:duplicate:"))
 async def cb_duplicate(call: CallbackQuery):
-    event_id = call.data.split(":", 2)[2]
+    token = call.data.split(":", 2)[2]
     data = load_data()
-    event = data["events"].get(event_id)
+    event_id = resolve_event_id(data, token)
+    event = data["events"].get(event_id) if event_id else None
     if not event:
         return await call.answer("Не найдено")
-    new_id = f"copy_{event_id}_{int(datetime.now(TZ).timestamp())}"
+    new_id = f"ev_{int(datetime.now(TZ).timestamp())}"
     new_event = event.copy()
     new_event["title"] = event.get("title", "") + " — копия"
     new_event["created_at"] = now_str()
     new_event["status"] = "open"
+    new_event["link_id"] = new_id
     data["events"][new_id] = new_event
     save_data(data)
-    await call.message.answer(f"📋 Дубликат создан.\n\n🔗 {event_link(new_id)}")
+    await call.message.answer(f"📋 Дубликат создан.\n\n🔗 {event_link(new_id, data)}")
     await call.answer()
 
 
@@ -676,7 +758,11 @@ async def send_all_broadcast(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("event:broadcast:"))
 async def cb_event_broadcast(call: CallbackQuery, state: FSMContext):
-    event_id = call.data.split(":", 2)[2]
+    token = call.data.split(":", 2)[2]
+    data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
     await state.update_data(event_broadcast_id=event_id)
     await call.message.answer("Введите сообщение для участников этого мероприятия:")
     await state.set_state(Broadcast.event_text)
@@ -734,23 +820,10 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.1.1 PostgreSQL</b>\n"
+        "🤖 Версия CRM: <b>V3.1.2 event-id fix</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n\n"
         "Следующий этап: Google Sheets.",
         parse_mode="HTML",
-    )
-
-
-@dp.message(Command("debug_db"))
-async def debug_db(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    data = load_data()
-    await message.answer(
-        f"💾 Хранилище: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}\n"
-        f"📅 Мероприятий: {len(data['events'])}\n"
-        f"👥 Регистраций: {len(data['registrations'])}\n"
-        f"🛡 Согласий: {len(data['consents'])}"
     )
 
 
@@ -801,9 +874,7 @@ async def summary_job():
 
 
 async def main():
-    print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}")
     init_db()
-    await bot.delete_webhook(drop_pending_updates=True)
     scheduler.add_job(summary_job, "interval", hours=3)
     scheduler.start()
     await dp.start_polling(bot)
