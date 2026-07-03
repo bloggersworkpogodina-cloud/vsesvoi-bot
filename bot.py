@@ -472,12 +472,26 @@ def delete_confirm_keyboard():
     )
 
 
+def admin_reply_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏠 Главная"), KeyboardButton(text="📅 Мероприятия")],
+            [KeyboardButton(text="👥 Участники"), KeyboardButton(text="📊 Аналитика")],
+            [KeyboardButton(text="📢 Рассылки"), KeyboardButton(text="⚙️ Настройки")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите раздел CRM",
+    )
+
+
 def admin_menu_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="➕ Создать мероприятие", callback_data="admin_new")],
-            [InlineKeyboardButton(text="📅 Все мероприятия", callback_data="admin_events")],
-            [InlineKeyboardButton(text="🔗 Ссылка на последний ивент", callback_data="admin_link")],
+            [InlineKeyboardButton(text="📅 Мои мероприятия", callback_data="crm_events")],
+            [InlineKeyboardButton(text="👥 Участники", callback_data="crm_participants")],
+            [InlineKeyboardButton(text="📊 Аналитика", callback_data="crm_analytics")],
+            [InlineKeyboardButton(text="⚙️ Настройки", callback_data="crm_settings")],
         ]
     )
 
@@ -499,6 +513,126 @@ def events_list_text(events):
         )
     return text
 
+
+def crm_dashboard_text() -> str:
+    events = load_events()
+    registrations = load_registrations()
+    today = now_moscow().strftime("%Y-%m-%d")
+    active_events = sum(1 for e in events.values() if e.get("is_active", True))
+    today_regs = len([r for r in registrations if str(r.get("registered_at", "")).startswith(today)])
+
+    last_reg = registrations[-1] if registrations else None
+    last_block = "Пока нет регистраций."
+    if last_reg:
+        last_block = (
+            f"{format_full_name(last_reg)}\n"
+            f"📅 {last_reg.get('event_title', '—')}\n"
+            f"🕐 {last_reg.get('registered_at', '—')}"
+        )
+
+    return (
+        "✨ <b>Все свои CRM</b>\n\n"
+        "Добро пожаловать, Настя 🤍\n\n"
+        "<b>Сегодня</b>\n"
+        f"📅 Активных мероприятий: <b>{active_events}</b>\n"
+        f"👥 Всего регистраций: <b>{len(registrations)}</b>\n"
+        f"📈 Новых сегодня: <b>+{today_regs}</b>\n\n"
+        "━━━━━━━━━━━━━━\n"
+        "<b>Последняя регистрация</b>\n"
+        f"{last_block}\n\n"
+        "Выберите действие ниже."
+    )
+
+
+def crm_events_keyboard():
+    events = load_events()
+    rows = []
+    for event_id, event in events.items():
+        title = event.get("title", event_id)
+        short_title = title if len(title) <= 32 else title[:29] + "..."
+        total = count_event_registrations(event_id)
+        rows.append([InlineKeyboardButton(text=f"📅 {short_title} · {total}", callback_data=f"event_view:{event_id}")])
+    rows.append([InlineKeyboardButton(text="➕ Создать мероприятие", callback_data="admin_new")])
+    rows.append([InlineKeyboardButton(text="🏠 Главная", callback_data="crm_home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def event_detail_text(event_id: str, event: dict) -> str:
+    total = count_event_registrations(event_id)
+    today = count_today_registrations(event_id)
+    status = "🟢 Активно" if event.get("is_active", True) else "⚪️ Закрыто"
+    return (
+        f"📅 <b>{event.get('title', '—')}</b>\n\n"
+        f"{status}\n"
+        f"📅 {event.get('date', '—')}\n"
+        f"🕕 {event.get('time', '—')}\n"
+        f"👥 Регистраций: <b>{total}</b>\n"
+        f"📈 Сегодня: <b>+{today}</b>\n\n"
+        f"<b>Описание:</b>\n{event.get('description', '—')}\n\n"
+        f"🔗 <b>Ссылка:</b>\n{event_link(event_id)}"
+    )
+
+
+def event_detail_keyboard(event_id: str):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Ссылка", callback_data=f"event_link:{event_id}")],
+            [InlineKeyboardButton(text="👥 Участники", callback_data=f"event_participants:{event_id}")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data=f"event_stats:{event_id}")],
+            [InlineKeyboardButton(text="⬅️ К мероприятиям", callback_data="crm_events")],
+            [InlineKeyboardButton(text="🏠 Главная", callback_data="crm_home")],
+        ]
+    )
+
+
+def participants_text(event_id: str | None = None) -> str:
+    registrations = load_registrations()
+    if event_id:
+        registrations = [r for r in registrations if r.get("event_id") == event_id]
+
+    if not registrations:
+        return "Пока нет регистраций."
+
+    title = "👥 <b>Участники</b>\n\n"
+    if event_id:
+        events = load_events()
+        event = events.get(event_id, {})
+        title = f"👥 <b>Участники: {event.get('title', event_id)}</b>\n\n"
+
+    text = title
+    for i, user in enumerate(registrations[-30:], start=1):
+        username = user.get("telegram_username") or "—"
+        text += (
+            f"{i}. <b>{format_full_name(user)}</b>\n"
+            f"📱 {user.get('phone', '—')}\n"
+            f"💼 {user.get('sphere', '—')}\n"
+            f"🌍 {user.get('city', '—')}\n"
+            f"💬 @{username}\n\n"
+        )
+    if len(registrations) > 30:
+        text += f"Показаны последние 30 из {len(registrations)}.\n"
+    return text
+
+
+def crm_analytics_text() -> str:
+    events = load_events()
+    registrations = load_registrations()
+    today = now_moscow().strftime("%Y-%m-%d")
+    today_regs = len([r for r in registrations if str(r.get("registered_at", "")).startswith(today)])
+
+    text = (
+        "📊 <b>Аналитика</b>\n\n"
+        f"👥 Всего регистраций: <b>{len(registrations)}</b>\n"
+        f"📈 Сегодня: <b>+{today_regs}</b>\n"
+        f"📅 Всего мероприятий: <b>{len(events)}</b>\n\n"
+        "<b>По мероприятиям:</b>\n"
+    )
+    if not events:
+        text += "Пока нет мероприятий."
+    else:
+        for event_id, event in events.items():
+            text += f"• {event.get('title', event_id)} — {count_event_registrations(event_id)}\n"
+    return text
 
 def registrations_for_event(event_id: str):
     return [r for r in load_registrations() if r.get("event_id") == event_id]
@@ -825,7 +959,168 @@ async def admin(message: Message):
     if not is_admin(message):
         await message.answer("У вас нет доступа к этой команде.")
         return
-    await message.answer("⚙️ <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_keyboard())
+    await message.answer("🏠 <b>Главное меню включено</b>", parse_mode="HTML", reply_markup=admin_reply_menu())
+    await message.answer(crm_dashboard_text(), parse_mode="HTML", reply_markup=admin_menu_keyboard())
+
+
+async def show_crm_home(message: Message):
+    await message.answer(crm_dashboard_text(), parse_mode="HTML", reply_markup=admin_menu_keyboard())
+
+
+@dp.message(F.text == "🏠 Главная")
+async def menu_home(message: Message):
+    if not is_admin(message):
+        return
+    await show_crm_home(message)
+
+
+@dp.message(F.text == "📅 Мероприятия")
+async def menu_events(message: Message):
+    if not is_admin(message):
+        return
+    await message.answer("📅 <b>Мои мероприятия</b>", parse_mode="HTML", reply_markup=crm_events_keyboard())
+
+
+@dp.message(F.text == "👥 Участники")
+async def menu_participants(message: Message):
+    if not is_admin(message):
+        return
+    await send_long_message(message, participants_text(), parse_mode="HTML")
+
+
+@dp.message(F.text == "📊 Аналитика")
+async def menu_analytics(message: Message):
+    if not is_admin(message):
+        return
+    await message.answer(crm_analytics_text(), parse_mode="HTML")
+
+
+@dp.message(F.text == "📢 Рассылки")
+async def menu_broadcasts(message: Message):
+    if not is_admin(message):
+        return
+    await message.answer(
+        "📢 <b>Рассылки</b>\n\n"
+        "Раздел в разработке. Скоро здесь можно будет отправлять сообщения участникам выбранного мероприятия.",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(F.text == "⚙️ Настройки")
+async def menu_settings(message: Message):
+    if not is_admin(message):
+        return
+    await message.answer(
+        "⚙️ <b>Настройки</b>\n\n"
+        "Документы: v1.0 ✅\n"
+        "Удаление данных: /delete_me ✅\n"
+        "Сводка: каждые 3 часа ✅",
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "crm_home")
+async def crm_home_callback(callback):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.answer(crm_dashboard_text(), parse_mode="HTML", reply_markup=admin_menu_keyboard())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "crm_events")
+async def crm_events_callback(callback):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.answer("📅 <b>Мои мероприятия</b>", parse_mode="HTML", reply_markup=crm_events_keyboard())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "crm_participants")
+async def crm_participants_callback(callback):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await send_long_message(callback.message, participants_text(), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "crm_analytics")
+async def crm_analytics_callback(callback):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.answer(crm_analytics_text(), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "crm_settings")
+async def crm_settings_callback(callback):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.answer(
+        "⚙️ <b>Настройки</b>\n\n"
+        "Документы: v1.0 ✅\n"
+        "Удаление данных: /delete_me ✅\n"
+        "Сводка: каждые 3 часа ✅",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("event_view:"))
+async def event_view_callback(callback):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    event_id = callback.data.split(":", 1)[1]
+    events = load_events()
+    event = events.get(event_id)
+    if not event:
+        await callback.message.answer("Мероприятие не найдено.")
+    else:
+        await callback.message.answer(event_detail_text(event_id, event), parse_mode="HTML", reply_markup=event_detail_keyboard(event_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("event_link:"))
+async def event_link_callback(callback):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    event_id = callback.data.split(":", 1)[1]
+    await callback.message.answer(f"🔗 Ссылка на регистрацию:\n\n{event_link(event_id)}")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("event_participants:"))
+async def event_participants_callback(callback):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    event_id = callback.data.split(":", 1)[1]
+    await send_long_message(callback.message, participants_text(event_id), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("event_stats:"))
+async def event_stats_callback(callback):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    event_id = callback.data.split(":", 1)[1]
+    events = load_events()
+    event = events.get(event_id, {})
+    await callback.message.answer(
+        f"📊 <b>Статистика</b>\n\n"
+        f"📅 {event.get('title', event_id)}\n"
+        f"👥 Всего регистраций: <b>{count_event_registrations(event_id)}</b>\n"
+        f"📈 Сегодня: <b>+{count_today_registrations(event_id)}</b>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "admin_new")
