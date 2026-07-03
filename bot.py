@@ -734,10 +734,23 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.0.2</b>\n"
+        "🤖 Версия CRM: <b>V3.1.1 PostgreSQL</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n\n"
         "Следующий этап: Google Sheets.",
         parse_mode="HTML",
+    )
+
+
+@dp.message(Command("debug_db"))
+async def debug_db(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    data = load_data()
+    await message.answer(
+        f"💾 Хранилище: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}\n"
+        f"📅 Мероприятий: {len(data['events'])}\n"
+        f"👥 Регистраций: {len(data['registrations'])}\n"
+        f"🛡 Согласий: {len(data['consents'])}"
     )
 
 
@@ -788,7 +801,9 @@ async def summary_job():
 
 
 async def main():
+    print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}")
     init_db()
+    await bot.delete_webhook(drop_pending_updates=True)
     scheduler.add_job(summary_job, "interval", hours=3)
     scheduler.start()
     await dp.start_polling(bot)
