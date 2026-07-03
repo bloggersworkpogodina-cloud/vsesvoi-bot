@@ -1,6 +1,9 @@
 import os
 import json
 import asyncio
+
+import psycopg2
+from psycopg2.extras import Json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -22,6 +25,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 BOT_USERNAME = os.getenv("BOT_USERNAME", "vsesvoi_event_business_bot")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 DATA_FILE = "data.json"
 DOC_VERSION = "1.0"
@@ -36,11 +40,13 @@ def now_str():
     return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {"events": {}, "registrations": [], "consents": [], "deleted": []}
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
+def empty_data():
+    return {"events": {}, "registrations": [], "consents": [], "deleted": []}
+
+
+def normalize_data(data):
+    if not isinstance(data, dict):
+        data = empty_data()
     data.setdefault("events", {})
     data.setdefault("registrations", [])
     data.setdefault("consents", [])
@@ -48,7 +54,78 @@ def load_data():
     return data
 
 
+def pg_connect():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def init_db():
+    if not DATABASE_URL:
+        return
+    with pg_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS app_state (
+                    id INTEGER PRIMARY KEY,
+                    data JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("SELECT data FROM app_state WHERE id = 1")
+            row = cur.fetchone()
+            if row is None:
+                initial = empty_data()
+                # Если рядом случайно остался старый data.json — переносим его в Postgres один раз.
+                if os.path.exists(DATA_FILE):
+                    try:
+                        with open(DATA_FILE, "r", encoding="utf-8") as f:
+                            initial = normalize_data(json.load(f))
+                    except Exception:
+                        initial = empty_data()
+                cur.execute(
+                    "INSERT INTO app_state (id, data) VALUES (1, %s)",
+                    (Json(initial),),
+                )
+        conn.commit()
+
+
+def load_data():
+    if DATABASE_URL:
+        try:
+            with pg_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT data FROM app_state WHERE id = 1")
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        return normalize_data(row[0])
+        except Exception as e:
+            print(f"PostgreSQL load error: {e}")
+    # Резервный режим без PostgreSQL. Для продакшена нужен DATABASE_URL.
+    if not os.path.exists(DATA_FILE):
+        return empty_data()
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return normalize_data(json.load(f))
+
+
 def save_data(data):
+    data = normalize_data(data)
+    if DATABASE_URL:
+        try:
+            with pg_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO app_state (id, data, updated_at)
+                        VALUES (1, %s, NOW())
+                        ON CONFLICT (id)
+                        DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+                        """,
+                        (Json(data),),
+                    )
+                conn.commit()
+            return
+        except Exception as e:
+            print(f"PostgreSQL save error: {e}")
+    # Резервный режим без PostgreSQL.
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -657,7 +734,8 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.0.1</b>\n\n"
+        "🤖 Версия CRM: <b>V3.0.2</b>\n"
+        f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n\n"
         "Следующий этап: Google Sheets.",
         parse_mode="HTML",
     )
@@ -710,6 +788,7 @@ async def summary_job():
 
 
 async def main():
+    init_db()
     scheduler.add_job(summary_job, "interval", hours=3)
     scheduler.start()
     await dp.start_polling(bot)
