@@ -19,6 +19,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -27,11 +29,14 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 EVENTS_FILE = "events.json"
 REGISTRATIONS_FILE = "registrations.json"
+SUMMARY_STATE_FILE = "summary_state.json"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 DEFAULT_CHAT_URL = "https://t.me/+vyrw8Q-AnAlkYWVi"
 DEFAULT_CHANNEL_URL = "https://t.me/voice_clubbbb"
 
+
+# ---------- Storage ----------
 
 def default_events():
     return {
@@ -83,6 +88,33 @@ def save_registrations(data):
     save_json(REGISTRATIONS_FILE, data)
 
 
+def load_summary_state():
+    return load_json(SUMMARY_STATE_FILE, {})
+
+
+def save_summary_state(data):
+    save_json(SUMMARY_STATE_FILE, data)
+
+
+# ---------- Helpers ----------
+
+def now_moscow() -> datetime:
+    return datetime.now(MOSCOW_TZ)
+
+
+def now_str() -> str:
+    return now_moscow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_dt(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=MOSCOW_TZ)
+    except ValueError:
+        return None
+
+
 def is_admin(message: Message) -> bool:
     return message.from_user and message.from_user.id in ADMIN_IDS
 
@@ -126,15 +158,70 @@ def events_list_text(events):
     text = "📅 <b>Мероприятия</b>\n\n"
     for i, (event_id, event) in enumerate(events.items(), start=1):
         status = "🟢" if event.get("is_active", True) else "⚪️"
+        total = count_event_registrations(event_id)
         text += (
             f"{i}. {status} <b>{event['title']}</b>\n"
             f"📅 {event.get('date', '—')}\n"
             f"🕕 {event.get('time', '—')}\n"
+            f"👥 Регистраций: {total}\n"
             f"ID: <code>{event_id}</code>\n"
             f"🔗 {event_link(event_id)}\n\n"
         )
     return text
 
+
+def registrations_for_event(event_id: str):
+    return [r for r in load_registrations() if r.get("event_id") == event_id]
+
+
+def count_event_registrations(event_id: str) -> int:
+    return len(registrations_for_event(event_id))
+
+
+def count_today_registrations(event_id: str) -> int:
+    today = now_moscow().strftime("%Y-%m-%d")
+    return len([
+        r for r in registrations_for_event(event_id)
+        if str(r.get("registered_at", "")).startswith(today)
+    ])
+
+
+def format_admin_registration(registration: dict, event: dict) -> str:
+    event_id = registration["event_id"]
+    total = count_event_registrations(event_id)
+    today_count = count_today_registrations(event_id)
+    username = registration.get("telegram_username") or "—"
+
+    return (
+        "🔥 <b>Новая регистрация</b>\n\n"
+        f"👤 <b>Имя:</b> {registration.get('name', '—')}\n"
+        f"📱 <b>Телефон:</b> {registration.get('phone', '—')}\n"
+        f"💼 <b>Сфера:</b> {registration.get('sphere', '—')}\n"
+        f"💬 <b>Telegram:</b> @{username}\n"
+        f"📅 <b>Мероприятие:</b> {event.get('title', '—')}\n\n"
+        "━━━━━━━━━━━━━━\n"
+        f"👥 <b>Всего регистраций:</b> {total}\n"
+        f"📈 <b>За сегодня:</b> +{today_count}"
+    )
+
+
+def format_milestone(event: dict, total: int) -> str:
+    return (
+        f"🎉 <b>Уже {total} регистраций!</b>\n\n"
+        f"📅 {event.get('title', '—')}\n"
+        "Темп отличный 🚀"
+    )
+
+
+async def send_to_admins(text: str):
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception:
+            pass
+
+
+# ---------- FSM ----------
 
 class Register(StatesGroup):
     name = State()
@@ -157,7 +244,10 @@ if not BOT_TOKEN:
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
 
+
+# ---------- Participant flow ----------
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
@@ -238,7 +328,7 @@ async def get_sphere(message: Message, state: FSMContext):
         "sphere": message.text.strip(),
         "telegram_id": message.from_user.id,
         "telegram_username": message.from_user.username,
-        "registered_at": datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "registered_at": now_str(),
     }
     registrations.append(registration)
     save_registrations(registrations)
@@ -255,19 +345,16 @@ async def get_sphere(message: Message, state: FSMContext):
         reply_markup=event_keyboard(event),
     )
 
-    for admin_id in ADMIN_IDS:
-        await bot.send_message(
-            admin_id,
-            f"🔥 Новая регистрация\n\n"
-            f"Мероприятие: {event['title']}\n"
-            f"Имя: {registration['name']}\n"
-            f"Телефон: {registration['phone']}\n"
-            f"Сфера: {registration['sphere']}\n"
-            f"Telegram: @{registration['telegram_username']}",
-        )
+    await send_to_admins(format_admin_registration(registration, event))
+
+    total = count_event_registrations(data["event_id"])
+    if total > 0 and total % 10 == 0:
+        await send_to_admins(format_milestone(event, total))
 
     await state.clear()
 
+
+# ---------- Admin panel ----------
 
 @dp.message(Command("admin"))
 async def admin(message: Message):
@@ -402,7 +489,7 @@ async def new_event_confirm(message: Message, state: FSMContext):
         "description": data["description"],
         "chat_url": data["chat_url"],
         "channel_url": data["channel_url"],
-        "created_at": datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "created_at": now_str(),
         "is_active": True,
     }
     save_events(events)
@@ -471,7 +558,75 @@ async def participants(message: Message):
         await message.answer(text, parse_mode="HTML")
 
 
+@dp.message(Command("summary"))
+async def manual_summary(message: Message):
+    if not is_admin(message):
+        await message.answer("У вас нет доступа к этой команде.")
+        return
+    text = build_summary_text(hours=3, force=True)
+    await message.answer(text, parse_mode="HTML")
+
+
+# ---------- Summary job ----------
+
+def build_summary_text(hours: int = 3, force: bool = False) -> str:
+    events = load_events()
+    registrations = load_registrations()
+    state = load_summary_state()
+
+    last_summary_at = parse_dt(state.get("last_summary_at"))
+    if last_summary_at is None:
+        # On first launch do not summarize the entire old history.
+        last_summary_at = now_moscow()
+
+    grouped: dict[str, list[dict]] = {}
+    for reg in registrations:
+        registered_at = parse_dt(reg.get("registered_at"))
+        if registered_at is None:
+            continue
+        if force or registered_at > last_summary_at:
+            grouped.setdefault(reg.get("event_id", "unknown"), []).append(reg)
+
+    if not grouped:
+        return "📊 За последние 3 часа новых регистраций не было."
+
+    text = f"📊 <b>Сводка за последние {hours} часа</b>\n\n"
+    for event_id, items in grouped.items():
+        event = events.get(event_id, {})
+        total = count_event_registrations(event_id)
+        text += (
+            f"📅 <b>{event.get('title') or items[0].get('event_title', event_id)}</b>\n"
+            f"➕ Новых регистраций: <b>{len(items)}</b>\n"
+            f"👥 Всего на мероприятие: <b>{total}</b>\n"
+            f"\nПоследние:\n"
+        )
+        for i, reg in enumerate(items[-5:], start=1):
+            text += f"{i}. {reg.get('name', '—')} — {reg.get('sphere', '—')}\n"
+        text += "\n"
+    return text.strip()
+
+
+async def send_3_hour_summary():
+    state = load_summary_state()
+    text = build_summary_text(hours=3, force=False)
+
+    # Do not send empty summaries.
+    if "новых регистраций не было" not in text:
+        await send_to_admins(text)
+
+    state["last_summary_at"] = now_str()
+    save_summary_state(state)
+
+
 async def main():
+    # Initialize summary timestamp to avoid sending all old registrations on first start.
+    state = load_summary_state()
+    if "last_summary_at" not in state:
+        state["last_summary_at"] = now_str()
+        save_summary_state(state)
+
+    scheduler.add_job(send_3_hour_summary, IntervalTrigger(hours=3), id="summary_3h", replace_existing=True)
+    scheduler.start()
     await dp.start_polling(bot)
 
 
