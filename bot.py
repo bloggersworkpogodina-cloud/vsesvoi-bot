@@ -156,7 +156,7 @@ def load_data():
                     if row and row[0]:
                         return normalize_data(row[0])
         except Exception as e:
-            print(f"PostgreSQL load error: {e}")
+            print(f"PostgreSQL load error: {e}", flush=True)
     # Резервный режим без PostgreSQL. Для продакшена нужен DATABASE_URL.
     if not os.path.exists(DATA_FILE):
         return empty_data()
@@ -182,7 +182,7 @@ def save_data(data):
                 conn.commit()
             return
         except Exception as e:
-            print(f"PostgreSQL save error: {e}")
+            print(f"PostgreSQL save error: {e}", flush=True)
     # Резервный режим без PostgreSQL.
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -208,7 +208,7 @@ def get_google_client():
         creds = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
         return gspread.service_account_from_dict(creds)
     except Exception as e:
-        print(f"Google Sheets auth error: {e}")
+        print(f"Google Sheets auth error: {e}", flush=True)
         return None
 
 
@@ -225,7 +225,7 @@ def get_or_create_worksheet(spreadsheet, title: str, headers: list[str]):
             else:
                 ws.update("1:1", [headers])
     except Exception as e:
-        print(f"Google Sheets header error: {e}")
+        print(f"Google Sheets header error: {e}", flush=True)
     return ws
 
 
@@ -273,7 +273,7 @@ def append_registration_to_sheets(registration: dict, event: dict):
         event_ws.append_row(row, value_input_option="USER_ENTERED")
         return True
     except Exception as e:
-        print(f"Google Sheets append error: {e}")
+        print(f"Google Sheets append error: {e}", flush=True)
         return False
 
 
@@ -1011,7 +1011,7 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.2 Google Sheets</b>\n"
+        "🤖 Версия CRM: <b>V3.2.1 Stable Sheets</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n"
         f"📊 Google Sheets: <b>{'подключен' if google_sheets_enabled() else 'не подключен'}</b>\n\n"
         "Следующий этап: тестовая регистрация.",
@@ -1066,9 +1066,14 @@ async def summary_job():
 
 
 async def main():
+    print("Starting Все свои CRM V3.2.1", flush=True)
+    print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}", flush=True)
+    print(f"Google Sheets configured: {'yes' if GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON else 'no'}", flush=True)
     init_db()
+    print("Database initialized", flush=True)
     scheduler.add_job(summary_job, "interval", hours=3)
     scheduler.start()
+    print("Bot polling started", flush=True)
     await dp.start_polling(bot)
 
 
