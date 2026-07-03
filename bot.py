@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import hashlib
+from html import escape
 
 import psycopg2
 from psycopg2.extras import Json
@@ -189,6 +190,19 @@ def event_link(event_id: str, data=None) -> str:
     return f"https://t.me/{BOT_USERNAME}?start={token}"
 
 
+def normalize_tg_url(value: str) -> str:
+    value = (value or "").strip()
+    if not value or value == "-":
+        return ""
+    if value.startswith("@"):
+        return "https://t.me/" + value[1:]
+    if value.startswith("t.me/"):
+        return "https://" + value
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    return value
+
+
 def event_regs(data, event_id):
     return [r for r in data["registrations"] if r.get("event_id") == event_id]
 
@@ -248,6 +262,56 @@ def event_card_kb(event_id, data=None):
     kb.adjust(1)
     return kb.as_markup()
 
+
+
+
+def participant_card_text(data, event_id, idx):
+    regs = event_regs(data, event_id)
+    try:
+        idx = int(idx)
+    except Exception:
+        return "Участник не найден."
+    if idx < 0 or idx >= len(regs):
+        return "Участник не найден."
+
+    r = regs[idx]
+    event = data.get("events", {}).get(event_id, {})
+    username = (r.get("telegram_username") or "").strip()
+    username_text = f"@{username}" if username else "не указан"
+    phone = r.get("phone") or "не указан"
+    city = r.get("city") or "не указан"
+    sphere = r.get("sphere") or "не указано"
+    registered_at = r.get("registered_at") or "не указано"
+    full_name = f"{r.get('first_name','')} {r.get('last_name','')}".strip() or "Без имени"
+    event_title = event.get("title") or r.get("event_title") or "Мероприятие"
+
+    return (
+        f"👤 <b>{escape(full_name)}</b>\n\n"
+        f"🆔 Telegram\n{escape(username_text)}\n\n"
+        f"📱 Телефон\n{escape(str(phone))}\n\n"
+        f"🏙 Город\n{escape(str(city))}\n\n"
+        f"💼 Деятельность\n{escape(str(sphere))}\n\n"
+        f"📅 Зарегистрирован\n{escape(str(registered_at))}\n\n"
+        f"🎫 Мероприятие\n{escape(str(event_title))}"
+    )
+
+
+def participant_card_kb(data, event_id, idx):
+    regs = event_regs(data, event_id)
+    kb = InlineKeyboardBuilder()
+    try:
+        idx_int = int(idx)
+    except Exception:
+        idx_int = -1
+    if 0 <= idx_int < len(regs):
+        username = (regs[idx_int].get("telegram_username") or "").strip()
+        if username:
+            kb.button(text="💬 Написать", url=f"https://t.me/{username}")
+    token = event_token(data, event_id)
+    kb.button(text="⬅️ К участникам", callback_data=f"event:participants:{token}")
+    kb.button(text="🏠 Главная", callback_data="crm:home")
+    kb.adjust(1)
+    return kb.as_markup()
 
 def manage_kb(event_id, data=None):
     kb = InlineKeyboardBuilder()
@@ -472,11 +536,17 @@ async def reg_city(message: Message, state: FSMContext):
     count = len(event_regs(data, st["event_id"]))
 
     kb = InlineKeyboardBuilder()
-    if event.get("chat_url"):
-        kb.button(text="💬 Чат участников", url=event["chat_url"])
-    if event.get("channel_url"):
-        kb.button(text="📢 Канал сообщества", url=event["channel_url"])
-    kb.adjust(1)
+    has_links = False
+    chat_url = normalize_tg_url(event.get("chat_url", ""))
+    channel_url = normalize_tg_url(event.get("channel_url", ""))
+    if chat_url:
+        kb.button(text="💬 Чат участников", url=chat_url)
+        has_links = True
+    if channel_url:
+        kb.button(text="📢 Канал сообщества", url=channel_url)
+        has_links = True
+    if has_links:
+        kb.adjust(1)
 
     await message.answer(
         f"🎉 <b>Регистрация подтверждена!</b>\n\n"
@@ -485,7 +555,7 @@ async def reg_city(message: Message, state: FSMContext):
         f"🕕 <b>{event.get('time','—')}</b>\n\n"
         "До встречи на мероприятии! 🚀",
         parse_mode="HTML",
-        reply_markup=kb.as_markup() if kb.buttons else None,
+        reply_markup=kb.as_markup() if has_links else None,
     )
 
     admin_text = (
@@ -555,7 +625,7 @@ async def new_desc(message: Message, state: FSMContext):
 
 @dp.message(NewEvent.chat_url)
 async def new_chat(message: Message, state: FSMContext):
-    await state.update_data(chat_url="" if message.text.strip() == "-" else message.text.strip())
+    await state.update_data(chat_url=normalize_tg_url(message.text))
     await message.answer("Ссылка на канал сообщества. Если нет — напишите -")
     await state.set_state(NewEvent.channel_url)
 
@@ -570,8 +640,8 @@ async def new_channel(message: Message, state: FSMContext):
         "date": st["date"],
         "time": st["time"],
         "description": st["description"],
-        "chat_url": st.get("chat_url", ""),
-        "channel_url": "" if message.text.strip() == "-" else message.text.strip(),
+        "chat_url": normalize_tg_url(st.get("chat_url", "")),
+        "channel_url": normalize_tg_url(message.text),
         "status": "open",
         "link_id": event_id,
         "created_at": now_str(),
@@ -606,20 +676,44 @@ async def cb_participants(call: CallbackQuery):
     if not event_id:
         return await call.answer("Мероприятие не найдено")
     regs = event_regs(data, event_id)
+    kb = InlineKeyboardBuilder()
     if not regs:
         text = "👥 Пока нет участников."
     else:
-        lines = [f"👥 <b>{len(regs)} участников</b>\n"]
+        text = f"👥 <b>{len(regs)} участников</b>\n\nВыберите участника, чтобы открыть карточку."
         for i, r in enumerate(regs[:30], 1):
-            lines.append(f"{i}. {r.get('first_name','')} {r.get('last_name','')}\n{r.get('sphere','')} • {r.get('city','')}")
+            full_name = f"{r.get('first_name','')} {r.get('last_name','')}".strip() or "Без имени"
+            city = r.get("city") or "—"
+            username = r.get("telegram_username")
+            label_tail = f"@{username}" if username else city
+            kb.button(
+                text=f"{i}. {full_name} • {label_tail}",
+                callback_data=f"event:participant:{event_token(data, event_id)}:{i-1}"
+            )
         if len(regs) > 30:
-            lines.append("\nПоказаны первые 30 участников.")
-        text = "\n\n".join(lines)
-    kb = InlineKeyboardBuilder()
+            text += "\n\nПоказаны первые 30 участников."
     kb.button(text="⬅️ Назад", callback_data=f"event:view:{event_token(data, event_id)}")
     kb.button(text="🏠 Главная", callback_data="crm:home")
     kb.adjust(1)
     await call.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("event:participant:"))
+async def cb_participant_card(call: CallbackQuery):
+    parts = call.data.split(":", 3)
+    if len(parts) != 4:
+        return await call.answer("Участник не найден")
+    _, _, token, idx = parts
+    data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+    await call.message.answer(
+        participant_card_text(data, event_id, idx),
+        parse_mode="HTML",
+        reply_markup=participant_card_kb(data, event_id, idx),
+    )
     await call.answer()
 
 
@@ -820,7 +914,7 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.1.2 event-id fix</b>\n"
+        "🤖 Версия CRM: <b>V3.1.4 participant cards</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n\n"
         "Следующий этап: Google Sheets.",
         parse_mode="HTML",
