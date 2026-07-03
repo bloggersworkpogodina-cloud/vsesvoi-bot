@@ -6,6 +6,11 @@ from html import escape
 
 import psycopg2
 from psycopg2.extras import Json
+
+try:
+    import gspread
+except Exception:
+    gspread = None
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -28,6 +33,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 BOT_USERNAME = os.getenv("BOT_USERNAME", "vsesvoi_event_business_bot")
 DATABASE_URL = os.getenv("DATABASE_URL")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_CREDENTIALS")
 
 DATA_FILE = "data.json"
 DOC_VERSION = "1.0"
@@ -179,6 +186,95 @@ def save_data(data):
     # Резервный режим без PostgreSQL.
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def google_sheets_enabled() -> bool:
+    return bool(GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON and gspread)
+
+
+def normalize_sheet_title(value: str, fallback: str = "Мероприятие") -> str:
+    value = (value or fallback).strip() or fallback
+    # Google Sheets sheet title cannot contain these characters.
+    for ch in [":", "\\", "/", "?", "*", "[", "]"]:
+        value = value.replace(ch, " ")
+    value = " ".join(value.split())
+    return value[:90] or fallback
+
+
+def get_google_client():
+    if not google_sheets_enabled():
+        return None
+    try:
+        creds = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        return gspread.service_account_from_dict(creds)
+    except Exception as e:
+        print(f"Google Sheets auth error: {e}")
+        return None
+
+
+def get_or_create_worksheet(spreadsheet, title: str, headers: list[str]):
+    try:
+        ws = spreadsheet.worksheet(title)
+    except Exception:
+        ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(10, len(headers)))
+    try:
+        first_row = ws.row_values(1)
+        if first_row != headers:
+            if not first_row:
+                ws.append_row(headers, value_input_option="USER_ENTERED")
+            else:
+                ws.update("1:1", [headers])
+    except Exception as e:
+        print(f"Google Sheets header error: {e}")
+    return ws
+
+
+def append_registration_to_sheets(registration: dict, event: dict):
+    # Google Sheets is an additional mirror. PostgreSQL remains the main storage.
+    if not google_sheets_enabled():
+        return False
+    client = get_google_client()
+    if not client:
+        return False
+    try:
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        headers = [
+            "Дата регистрации",
+            "Мероприятие",
+            "Имя",
+            "Фамилия",
+            "Телефон",
+            "Город",
+            "Деятельность",
+            "Telegram username",
+            "Telegram ID",
+            "Версия документов",
+        ]
+        username = registration.get("telegram_username") or ""
+        username = f"@{username}" if username else ""
+        row = [
+            registration.get("registered_at", ""),
+            registration.get("event_title") or event.get("title", ""),
+            registration.get("first_name", ""),
+            registration.get("last_name", ""),
+            registration.get("phone", ""),
+            registration.get("city", ""),
+            registration.get("sphere", ""),
+            username,
+            str(registration.get("telegram_id", "")),
+            registration.get("documents_version", ""),
+        ]
+
+        master = get_or_create_worksheet(spreadsheet, "Все регистрации", headers)
+        master.append_row(row, value_input_option="USER_ENTERED")
+
+        event_title = normalize_sheet_title(registration.get("event_title") or event.get("title") or "Мероприятие")
+        event_ws = get_or_create_worksheet(spreadsheet, event_title, headers)
+        event_ws.append_row(row, value_input_option="USER_ENTERED")
+        return True
+    except Exception as e:
+        print(f"Google Sheets append error: {e}")
+        return False
 
 
 def is_admin(user_id: int) -> bool:
@@ -533,6 +629,7 @@ async def reg_city(message: Message, state: FSMContext):
     }
     data["registrations"].append(registration)
     save_data(data)
+    append_registration_to_sheets(registration, event)
     count = len(event_regs(data, st["event_id"]))
 
     kb = InlineKeyboardBuilder()
@@ -914,9 +1011,10 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.1.4 participant cards</b>\n"
-        f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n\n"
-        "Следующий этап: Google Sheets.",
+        "🤖 Версия CRM: <b>V3.2 Google Sheets</b>\n"
+        f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n"
+        f"📊 Google Sheets: <b>{'подключен' if google_sheets_enabled() else 'не подключен'}</b>\n\n"
+        "Следующий этап: тестовая регистрация.",
         parse_mode="HTML",
     )
 
