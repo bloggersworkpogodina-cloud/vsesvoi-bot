@@ -1,2 +1,6 @@
-aiogram==3.13.1
+aiogram==3.7.0
 python-dotenv==1.0.1
+apscheduler==3.10.4
+psycopg2-binary==2.9.9
+gspread==6.1.4
+google-auth==2.35.0
