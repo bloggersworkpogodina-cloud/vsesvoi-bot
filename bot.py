@@ -509,7 +509,6 @@ class Broadcast(StatesGroup):
 
 
 def admin_reply_kb():
-    # CRM-меню администратора: без пользовательской кнопки реферальной программы.
     keyboard = [
         [KeyboardButton(text="🏠 Главная"), KeyboardButton(text="📅 Мероприятия")],
         [KeyboardButton(text="📢 Рассылки"), KeyboardButton(text="📊 Аналитика")],
@@ -598,6 +597,80 @@ def choose_ref_event_kb(data):
     return kb.as_markup()
 
 
+def referral_leaderboard(data, event_id=None):
+    regs = event_regs(data, event_id) if event_id else data.get("registrations", [])
+    counts = {}
+    names = {}
+    for r in regs:
+        inviter_id = r.get("invited_by_telegram_id")
+        if not inviter_id:
+            continue
+        try:
+            inviter_id = int(inviter_id)
+        except Exception:
+            continue
+        counts[inviter_id] = counts.get(inviter_id, 0) + 1
+        inviter = find_inviter(data, inviter_id) or {}
+        name = f"{inviter.get('first_name','')} {inviter.get('last_name','')}".strip()
+        username = inviter.get("telegram_username")
+        names[inviter_id] = f"@{username}" if username else (name or str(inviter_id))
+    return counts, names
+
+
+def event_referral_count(data, event_id):
+    counts, _ = referral_leaderboard(data, event_id)
+    return sum(counts.values())
+
+
+def admin_referral_text(data):
+    active_events = [
+        (eid, e) for eid, e in data.get("events", {}).items()
+        if e.get("status", "open") not in ["archived", "closed"]
+    ]
+    total_counts, total_names = referral_leaderboard(data)
+    total_invited = sum(total_counts.values())
+
+    lines = [
+        "🤝 <b>Реферальная программа</b>",
+        "",
+        "Это админ-раздел: здесь сводка по приглашениям, а не личная ссылка.",
+        "",
+        f"📅 Активных мероприятий: <b>{len(active_events)}</b>",
+        f"👥 Всего приглашено по реферальным ссылкам: <b>{total_invited}</b>",
+        "",
+    ]
+
+    if active_events:
+        lines.append("📅 <b>По мероприятиям:</b>")
+        for i, (eid, event) in enumerate(active_events[:10], 1):
+            title = event.get("title", "Мероприятие")
+            invited = event_referral_count(data, eid)
+            lines.append(f"{i}. {escape(str(title))} — <b>{invited}</b>")
+        lines.append("")
+
+    if total_counts:
+        lines.append("🏆 <b>Общий рейтинг:</b>")
+        for i, (uid, cnt) in enumerate(sorted(total_counts.items(), key=lambda x: x[1], reverse=True)[:10], 1):
+            lines.append(f"{i}. {escape(total_names.get(uid, str(uid)))} — {cnt}")
+    else:
+        lines.append("Пока нет регистраций по реферальным ссылкам.")
+
+    return "\n".join(lines)
+
+
+def admin_referral_kb(data):
+    kb = InlineKeyboardBuilder()
+    for eid, event in data.get("events", {}).items():
+        if event.get("status", "open") in ["archived", "closed"]:
+            continue
+        title = event.get("title", "Мероприятие")
+        invited = event_referral_count(data, eid)
+        kb.button(text=f"📅 {title} • {invited}", callback_data=f"event:referrals:{event_token(data, eid)}")
+    kb.button(text="🏠 Главная", callback_data="crm:home")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 async def send_home(message_or_query):
     data = load_data()
     active_count = len([e for e in data["events"].values() if e.get("status", "open") != "archived"])
@@ -634,6 +707,14 @@ async def user_referral_program(message: Message, state: FSMContext = None):
         except Exception:
             pass
     data = load_data()
+
+    if is_admin(message.from_user.id):
+        return await message.answer(
+            admin_referral_text(data),
+            parse_mode="HTML",
+            reply_markup=admin_referral_kb(data),
+        )
+
     event_id = choose_ref_event_for_user(data, message.from_user.id)
 
     if event_id:
@@ -1255,7 +1336,7 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.3.4 Referral Menu Separation</b>\n"
+        "🤖 Версия CRM: <b>V3.3.5 Admin Referral Analytics</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n"
         f"📊 Google Sheets: <b>{'подключен' if google_sheets_enabled() else 'не подключен'}</b>\n\n"
         "Следующий этап: Google Sheets 2.0 и отметка посещения.",
@@ -1310,7 +1391,7 @@ async def summary_job():
 
 
 async def main():
-    print("Starting Все свои CRM V3.3.4 Referral Menu Separation", flush=True)
+    print("Starting Все свои CRM V3.3.5 Admin Referral Analytics", flush=True)
     print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}", flush=True)
     print(f"Google Sheets configured: {'yes' if GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON else 'no'}", flush=True)
     init_db()
