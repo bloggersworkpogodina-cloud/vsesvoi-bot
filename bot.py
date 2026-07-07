@@ -248,10 +248,15 @@ def append_registration_to_sheets(registration: dict, event: dict):
             "Деятельность",
             "Telegram username",
             "Telegram ID",
+            "Пригласил Telegram ID",
+            "Пригласил username",
+            "Реферальная ссылка",
             "Версия документов",
         ]
         username = registration.get("telegram_username") or ""
         username = f"@{username}" if username else ""
+        invited_username = registration.get("invited_by_username") or ""
+        invited_username = f"@{invited_username}" if invited_username else ""
         row = [
             registration.get("registered_at", ""),
             registration.get("event_title") or event.get("title", ""),
@@ -262,6 +267,9 @@ def append_registration_to_sheets(registration: dict, event: dict):
             registration.get("sphere", ""),
             username,
             str(registration.get("telegram_id", "")),
+            str(registration.get("invited_by_telegram_id", "")),
+            invited_username,
+            registration.get("referral_link", ""),
             registration.get("documents_version", ""),
         ]
 
@@ -284,6 +292,39 @@ def is_admin(user_id: int) -> bool:
 def event_link(event_id: str, data=None) -> str:
     token = event_token(data, event_id) if data else (event_id if is_safe_token(event_id) else make_link_id(event_id))
     return f"https://t.me/{BOT_USERNAME}?start={token}"
+
+
+def parse_start_payload(payload: str, data: dict):
+    """Return (event_id, invited_by_telegram_id). Supports links like ev_xxx__ref_123."""
+    payload = (payload or "").strip()
+    invited_by = None
+    token = payload
+    if "__ref_" in payload:
+        token, ref_part = payload.split("__ref_", 1)
+        try:
+            invited_by = int(ref_part.strip())
+        except Exception:
+            invited_by = None
+    event_id = resolve_event_id(data, token)
+    return event_id, invited_by
+
+
+def referral_link(event_id: str, telegram_id: int, data=None) -> str:
+    token = event_token(data, event_id) if data else (event_id if is_safe_token(event_id) else make_link_id(event_id))
+    return f"https://t.me/{BOT_USERNAME}?start={token}__ref_{telegram_id}"
+
+
+def find_inviter(data: dict, invited_by_telegram_id):
+    if not invited_by_telegram_id:
+        return None
+    try:
+        invited_by_telegram_id = int(invited_by_telegram_id)
+    except Exception:
+        return None
+    for r in reversed(data.get("registrations", [])):
+        if r.get("telegram_id") == invited_by_telegram_id:
+            return r
+    return None
 
 
 def normalize_tg_url(value: str) -> str:
@@ -351,6 +392,7 @@ def event_card_kb(event_id, data=None):
     kb = InlineKeyboardBuilder()
     token = event_token(data, event_id) if data else (event_id if is_safe_token(event_id) else make_link_id(event_id))
     kb.button(text="👥 Участники", callback_data=f"event:participants:{token}")
+    kb.button(text="🤝 Рефералы", callback_data=f"event:referrals:{token}")
     kb.button(text="📢 Рассылка", callback_data=f"event:broadcast:{token}")
     kb.button(text="⚙️ Управление", callback_data=f"event:manage:{token}")
     kb.button(text="⬅️ Назад", callback_data="crm:events")
@@ -528,14 +570,16 @@ async def start(message: Message, state: FSMContext):
 
     token = args[1]
     data = load_data()
-    event_id = resolve_event_id(data, token)
+    event_id, invited_by = parse_start_payload(token, data)
+    if invited_by == message.from_user.id:
+        invited_by = None
     event = data["events"].get(event_id) if event_id else None
     if not event:
         return await message.answer("Мероприятие не найдено. Проверьте ссылку.")
     if event.get("status") in ["closed", "paused", "archived"]:
         return await message.answer("Регистрация на это мероприятие сейчас закрыта.")
 
-    await state.update_data(event_id=event_id)
+    await state.update_data(event_id=event_id, invited_by_telegram_id=invited_by)
     await message.answer(
         "🤍 <b>Добро пожаловать!</b>\n\n"
         "Для регистрации ознакомьтесь с документами.\n\n"
@@ -614,6 +658,13 @@ async def reg_city(message: Message, state: FSMContext):
     st = await state.get_data()
     data = load_data()
     event = data["events"].get(st["event_id"], {})
+    invited_by = st.get("invited_by_telegram_id")
+    if invited_by == message.from_user.id:
+        invited_by = None
+    inviter = find_inviter(data, invited_by)
+    invited_by_username = (inviter or {}).get("telegram_username") or ""
+    invited_by_name = f"{(inviter or {}).get('first_name','')} {(inviter or {}).get('last_name','')}".strip()
+
     registration = {
         "event_id": st["event_id"],
         "event_title": event.get("title", ""),
@@ -626,7 +677,11 @@ async def reg_city(message: Message, state: FSMContext):
         "telegram_username": message.from_user.username,
         "registered_at": now_str(),
         "documents_version": DOC_VERSION,
+        "invited_by_telegram_id": invited_by or "",
+        "invited_by_username": invited_by_username,
+        "invited_by_name": invited_by_name,
     }
+    registration["referral_link"] = referral_link(st["event_id"], message.from_user.id, data)
     data["registrations"].append(registration)
     save_data(data)
     append_registration_to_sheets(registration, event)
@@ -811,6 +866,49 @@ async def cb_participant_card(call: CallbackQuery):
         parse_mode="HTML",
         reply_markup=participant_card_kb(data, event_id, idx),
     )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("event:referrals:"))
+async def cb_event_referrals(call: CallbackQuery):
+    token = call.data.split(":", 2)[2]
+    data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+
+    regs = event_regs(data, event_id)
+    counts = {}
+    names = {}
+    for r in regs:
+        inviter_id = r.get("invited_by_telegram_id")
+        if not inviter_id:
+            continue
+        try:
+            inviter_id = int(inviter_id)
+        except Exception:
+            continue
+        counts[inviter_id] = counts.get(inviter_id, 0) + 1
+        inviter = find_inviter(data, inviter_id) or {}
+        name = f"{inviter.get('first_name','')} {inviter.get('last_name','')}".strip()
+        username = inviter.get("telegram_username")
+        names[inviter_id] = f"@{username}" if username else (name or str(inviter_id))
+
+    lines = ["🤝 <b>Реферальная программа</b>", ""]
+    lines.append(f"Всего приглашено: <b>{sum(counts.values())}</b>")
+    lines.append("")
+    if counts:
+        lines.append("🏆 <b>Топ участников:</b>")
+        for i, (uid, cnt) in enumerate(sorted(counts.items(), key=lambda x: x[1], reverse=True)[:10], 1):
+            lines.append(f"{i}. {escape(names.get(uid, str(uid)))} — {cnt}")
+    else:
+        lines.append("Пока никто не зарегистрировался по реферальной ссылке.")
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data=f"event:view:{event_token(data, event_id)}")
+    kb.button(text="🏠 Главная", callback_data="crm:home")
+    kb.adjust(1)
+    await call.message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb.as_markup())
     await call.answer()
 
 
@@ -1011,10 +1109,10 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.2.1 Stable Sheets</b>\n"
+        "🤖 Версия CRM: <b>V3.3 Referral Program</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n"
         f"📊 Google Sheets: <b>{'подключен' if google_sheets_enabled() else 'не подключен'}</b>\n\n"
-        "Следующий этап: тестовая регистрация.",
+        "Следующий этап: Google Sheets 2.0 и отметка посещения.",
         parse_mode="HTML",
     )
 
@@ -1066,7 +1164,7 @@ async def summary_job():
 
 
 async def main():
-    print("Starting Все свои CRM V3.2.1", flush=True)
+    print("Starting Все свои CRM V3.3 Referral Program", flush=True)
     print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}", flush=True)
     print(f"Google Sheets configured: {'yes' if GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON else 'no'}", flush=True)
     init_db()
