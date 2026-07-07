@@ -15,7 +15,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -623,8 +623,15 @@ async def admin(message: Message):
     await send_home(message)
 
 
-@dp.message(F.text == "🤝 Реферальная программа")
-async def user_referral_program(message: Message):
+@dp.message(StateFilter("*"), F.text.func(lambda text: bool(text) and "рефераль" in text.lower()))
+@dp.message(Command("ref"))
+async def user_referral_program(message: Message, state: FSMContext = None):
+    # Кнопка должна работать всегда, даже если у пользователя случайно остался старый FSM-state.
+    if state is not None:
+        try:
+            await state.clear()
+        except Exception:
+            pass
     data = load_data()
     event_id = choose_ref_event_for_user(data, message.from_user.id)
 
@@ -818,6 +825,10 @@ async def reg_city(message: Message, state: FSMContext):
     append_registration_to_sheets(registration, event)
     count = len(event_regs(data, st["event_id"]))
 
+    # Освобождаем состояние сразу после сохранения, чтобы нижняя кнопка
+    # «🤝 Реферальная программа» работала сразу после регистрации.
+    await state.clear()
+
     kb = InlineKeyboardBuilder()
     has_links = False
     chat_url = normalize_tg_url(event.get("chat_url", ""))
@@ -858,7 +869,6 @@ async def reg_city(message: Message, state: FSMContext):
         await bot.send_message(admin_id, admin_text, parse_mode="HTML")
         if count % 10 == 0:
             await bot.send_message(admin_id, f"🎊 Уже <b>{count}</b> регистраций на мероприятие «{event.get('title','')}»!", parse_mode="HTML")
-    await state.clear()
 
 
 @dp.callback_query(F.data == "crm:home")
@@ -1244,7 +1254,7 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.3.1 Referral Button</b>\n"
+        "🤖 Версия CRM: <b>V3.3.2 Referral Button Fix</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n"
         f"📊 Google Sheets: <b>{'подключен' if google_sheets_enabled() else 'не подключен'}</b>\n\n"
         "Следующий этап: Google Sheets 2.0 и отметка посещения.",
@@ -1299,7 +1309,7 @@ async def summary_job():
 
 
 async def main():
-    print("Starting Все свои CRM V3.3.1 Referral Button", flush=True)
+    print("Starting Все свои CRM V3.3.2 Referral Button Fix", flush=True)
     print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}", flush=True)
     print(f"Google Sheets configured: {'yes' if GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON else 'no'}", flush=True)
     init_db()
