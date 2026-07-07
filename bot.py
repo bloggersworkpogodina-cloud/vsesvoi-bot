@@ -511,10 +511,90 @@ class Broadcast(StatesGroup):
 def admin_reply_kb():
     keyboard = [
         [KeyboardButton(text="🏠 Главная"), KeyboardButton(text="📅 Мероприятия")],
-        [KeyboardButton(text="📢 Рассылки"), KeyboardButton(text="📊 Аналитика")],
-        [KeyboardButton(text="⚙️ Система")],
+        [KeyboardButton(text="🤝 Реферальная программа"), KeyboardButton(text="📊 Аналитика")],
+        [KeyboardButton(text="📢 Рассылки"), KeyboardButton(text="⚙️ Система")],
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def participant_reply_kb():
+    keyboard = [
+        [KeyboardButton(text="🤝 Реферальная программа")],
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def referral_stats_for_user(data, event_id, telegram_id):
+    try:
+        telegram_id = int(telegram_id)
+    except Exception:
+        return 0
+    count = 0
+    for r in event_regs(data, event_id):
+        invited_by = r.get("invited_by_telegram_id")
+        try:
+            invited_by = int(invited_by)
+        except Exception:
+            continue
+        if invited_by == telegram_id:
+            count += 1
+    return count
+
+
+def choose_ref_event_for_user(data, telegram_id):
+    # 1) Берем последнее мероприятие, на которое человек уже зарегистрирован.
+    regs = [r for r in data.get("registrations", []) if r.get("telegram_id") == telegram_id]
+    for r in reversed(regs):
+        event_id = r.get("event_id")
+        event = data.get("events", {}).get(event_id)
+        if event and event.get("status", "open") != "archived":
+            return event_id
+
+    # 2) Если регистраций нет — берем единственное активное мероприятие.
+    active = [
+        eid for eid, e in data.get("events", {}).items()
+        if e.get("status", "open") not in ["archived", "closed"]
+    ]
+    if len(active) == 1:
+        return active[0]
+
+    # 3) Если активных несколько — пусть пользователь выберет мероприятие.
+    return None
+
+
+def user_referral_text(data, event_id, telegram_id):
+    event = data.get("events", {}).get(event_id, {})
+    link = referral_link(event_id, telegram_id, data)
+    invited_count = referral_stats_for_user(data, event_id, telegram_id)
+    return (
+        "🤝 <b>Реферальная программа</b>\n\n"
+        f"🎫 Мероприятие:\n<b>{escape(str(event.get('title', 'Мероприятие')))}</b>\n\n"
+        "Ваша персональная ссылка:\n"
+        f"{link}\n\n"
+        f"👥 Приглашено по вашей ссылке: <b>{invited_count}</b>\n\n"
+        "Отправьте эту ссылку друзьям — если человек зарегистрируется по ней, приглашение засчитается вам."
+    )
+
+
+def user_referral_kb(data, event_id, telegram_id):
+    kb = InlineKeyboardBuilder()
+    link = referral_link(event_id, telegram_id, data)
+    share_text = "Приглашаю на мероприятие сообщества «Все свои»"
+    share_url = "https://t.me/share/url?url=" + link + "&text=" + share_text.replace(" ", "%20")
+    kb.button(text="📤 Поделиться ссылкой", url=share_url)
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def choose_ref_event_kb(data):
+    kb = InlineKeyboardBuilder()
+    for eid, e in data.get("events", {}).items():
+        if e.get("status", "open") in ["archived", "closed"]:
+            continue
+        title = e.get("title", "Мероприятие")
+        kb.button(text=f"🎫 {title}", callback_data=f"userref:{event_token(data, eid)}")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 async def send_home(message_or_query):
@@ -543,6 +623,53 @@ async def admin(message: Message):
     await send_home(message)
 
 
+@dp.message(F.text == "🤝 Реферальная программа")
+async def user_referral_program(message: Message):
+    data = load_data()
+    event_id = choose_ref_event_for_user(data, message.from_user.id)
+
+    if event_id:
+        return await message.answer(
+            user_referral_text(data, event_id, message.from_user.id),
+            parse_mode="HTML",
+            reply_markup=user_referral_kb(data, event_id, message.from_user.id),
+        )
+
+    active = [
+        eid for eid, e in data.get("events", {}).items()
+        if e.get("status", "open") not in ["archived", "closed"]
+    ]
+    if not active:
+        return await message.answer(
+            "🤝 <b>Реферальная программа</b>\n\n"
+            "Сейчас нет активных мероприятий для приглашения.",
+            parse_mode="HTML",
+            reply_markup=participant_reply_kb(),
+        )
+
+    await message.answer(
+        "🤝 <b>Реферальная программа</b>\n\n"
+        "Выберите мероприятие, на которое хотите пригласить людей:",
+        parse_mode="HTML",
+        reply_markup=choose_ref_event_kb(data),
+    )
+
+
+@dp.callback_query(F.data.startswith("userref:"))
+async def cb_user_referral_program(call: CallbackQuery):
+    token = call.data.split(":", 1)[1]
+    data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+    await call.message.answer(
+        user_referral_text(data, event_id, call.from_user.id),
+        parse_mode="HTML",
+        reply_markup=user_referral_kb(data, event_id, call.from_user.id),
+    )
+    await call.answer()
+
+
 @dp.message(F.text.in_(["🏠 Главная", "📅 Мероприятия", "📢 Рассылки", "📊 Аналитика", "⚙️ Система"]))
 async def reply_menu(message: Message):
     if not is_admin(message.from_user.id):
@@ -566,7 +693,11 @@ async def start(message: Message, state: FSMContext):
     if len(args) == 1:
         if is_admin(message.from_user.id):
             return await send_home(message)
-        return await message.answer("Добро пожаловать! Для регистрации используйте ссылку на конкретное мероприятие.")
+        return await message.answer(
+            "Добро пожаловать! Для регистрации используйте ссылку на конкретное мероприятие.\n\n"
+            "Реферальная программа доступна в нижнем меню бота.",
+            reply_markup=participant_reply_kb(),
+        )
 
     token = args[1]
     data = load_data()
@@ -708,6 +839,10 @@ async def reg_city(message: Message, state: FSMContext):
         "До встречи на мероприятии! 🚀",
         parse_mode="HTML",
         reply_markup=kb.as_markup() if has_links else None,
+    )
+    await message.answer(
+        "🤝 Ваша реферальная программа всегда доступна в нижнем меню бота.",
+        reply_markup=participant_reply_kb(),
     )
 
     admin_text = (
@@ -1109,7 +1244,7 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.3 Referral Program</b>\n"
+        "🤖 Версия CRM: <b>V3.3.1 Referral Button</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n"
         f"📊 Google Sheets: <b>{'подключен' if google_sheets_enabled() else 'не подключен'}</b>\n\n"
         "Следующий этап: Google Sheets 2.0 и отметка посещения.",
@@ -1164,7 +1299,7 @@ async def summary_job():
 
 
 async def main():
-    print("Starting Все свои CRM V3.3 Referral Program", flush=True)
+    print("Starting Все свои CRM V3.3.1 Referral Button", flush=True)
     print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}", flush=True)
     print(f"Google Sheets configured: {'yes' if GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON else 'no'}", flush=True)
     init_db()
