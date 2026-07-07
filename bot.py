@@ -3,7 +3,6 @@ import json
 import asyncio
 import hashlib
 from html import escape
-from urllib.parse import quote
 
 import psycopg2
 from psycopg2.extras import Json
@@ -510,10 +509,11 @@ class Broadcast(StatesGroup):
 
 
 def admin_reply_kb():
+    # CRM-меню администратора: без пользовательской кнопки реферальной программы.
     keyboard = [
         [KeyboardButton(text="🏠 Главная"), KeyboardButton(text="📅 Мероприятия")],
-        [KeyboardButton(text="🤝 Реферальная программа"), KeyboardButton(text="📊 Аналитика")],
-        [KeyboardButton(text="📢 Рассылки"), KeyboardButton(text="⚙️ Система")],
+        [KeyboardButton(text="📢 Рассылки"), KeyboardButton(text="📊 Аналитика")],
+        [KeyboardButton(text="⚙️ Система")],
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -581,7 +581,7 @@ def user_referral_kb(data, event_id, telegram_id):
     kb = InlineKeyboardBuilder()
     link = referral_link(event_id, telegram_id, data)
     share_text = "Приглашаю на мероприятие сообщества «Все свои»"
-    share_url = "https://t.me/share/url?url=" + quote(link, safe="") + "&text=" + quote(share_text, safe="")
+    share_url = "https://t.me/share/url?url=" + link + "&text=" + share_text.replace(" ", "%20")
     kb.button(text="📤 Поделиться ссылкой", url=share_url)
     kb.adjust(1)
     return kb.as_markup()
@@ -624,7 +624,9 @@ async def admin(message: Message):
     await send_home(message)
 
 
-async def send_user_referral_program(message: Message, state: FSMContext = None):
+@dp.message(StateFilter("*"), F.text.func(lambda text: bool(text) and "рефераль" in text.lower()))
+@dp.message(Command("ref"))
+async def user_referral_program(message: Message, state: FSMContext = None):
     # Кнопка должна работать всегда, даже если у пользователя случайно остался старый FSM-state.
     if state is not None:
         try:
@@ -635,16 +637,11 @@ async def send_user_referral_program(message: Message, state: FSMContext = None)
     event_id = choose_ref_event_for_user(data, message.from_user.id)
 
     if event_id:
-        text = user_referral_text(data, event_id, message.from_user.id)
-        try:
-            return await message.answer(
-                text,
-                parse_mode="HTML",
-                reply_markup=user_referral_kb(data, event_id, message.from_user.id),
-            )
-        except Exception as e:
-            print(f"Referral message error: {e}", flush=True)
-            return await message.answer(text, parse_mode="HTML")
+        return await message.answer(
+            user_referral_text(data, event_id, message.from_user.id),
+            parse_mode="HTML",
+            reply_markup=user_referral_kb(data, event_id, message.from_user.id),
+        )
 
     active = [
         eid for eid, e in data.get("events", {}).items()
@@ -664,21 +661,6 @@ async def send_user_referral_program(message: Message, state: FSMContext = None)
         parse_mode="HTML",
         reply_markup=choose_ref_event_kb(data),
     )
-
-
-@dp.message(Command("ref"))
-async def user_referral_command(message: Message, state: FSMContext):
-    await send_user_referral_program(message, state)
-
-
-@dp.message(StateFilter("*"), F.text == "🤝 Реферальная программа")
-async def user_referral_button_exact(message: Message, state: FSMContext):
-    await send_user_referral_program(message, state)
-
-
-@dp.message(StateFilter("*"), F.text.func(lambda text: bool(text) and "рефераль" in text.lower()))
-async def user_referral_button_contains(message: Message, state: FSMContext):
-    await send_user_referral_program(message, state)
 
 
 @dp.callback_query(F.data.startswith("userref:"))
@@ -1273,7 +1255,7 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.3.3 Referral Button Stable</b>\n"
+        "🤖 Версия CRM: <b>V3.3.4 Referral Menu Separation</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n"
         f"📊 Google Sheets: <b>{'подключен' if google_sheets_enabled() else 'не подключен'}</b>\n\n"
         "Следующий этап: Google Sheets 2.0 и отметка посещения.",
@@ -1328,7 +1310,7 @@ async def summary_job():
 
 
 async def main():
-    print("Starting Все свои CRM V3.3.3 Referral Button Stable", flush=True)
+    print("Starting Все свои CRM V3.3.4 Referral Menu Separation", flush=True)
     print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}", flush=True)
     print(f"Google Sheets configured: {'yes' if GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON else 'no'}", flush=True)
     init_db()
