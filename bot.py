@@ -347,6 +347,7 @@ def event_regs(data, event_id):
 def main_menu_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="📅 Мероприятия", callback_data="crm:events")
+    kb.button(text="🤝 Реферальная программа", callback_data="crm:referrals")
     kb.button(text="📢 Рассылки", callback_data="crm:broadcasts")
     kb.button(text="📊 Аналитика", callback_data="crm:analytics")
     kb.button(text="⚙️ Система", callback_data="crm:system")
@@ -511,8 +512,8 @@ class Broadcast(StatesGroup):
 def admin_reply_kb():
     keyboard = [
         [KeyboardButton(text="🏠 Главная"), KeyboardButton(text="📅 Мероприятия")],
-        [KeyboardButton(text="📢 Рассылки"), KeyboardButton(text="📊 Аналитика")],
-        [KeyboardButton(text="⚙️ Система")],
+        [KeyboardButton(text="🤝 Реферальная программа"), KeyboardButton(text="📊 Аналитика")],
+        [KeyboardButton(text="📢 Рассылки"), KeyboardButton(text="⚙️ Система")],
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -1232,6 +1233,19 @@ async def cb_stub(call: CallbackQuery):
     await call.answer()
 
 
+@dp.callback_query(F.data == "crm:referrals")
+async def cb_admin_referrals(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("Нет доступа")
+    data = load_data()
+    await call.message.answer(
+        admin_referral_text(data),
+        parse_mode="HTML",
+        reply_markup=admin_referral_kb(data),
+    )
+    await call.answer()
+
+
 @dp.callback_query(F.data == "crm:broadcasts")
 async def cb_broadcasts(call: CallbackQuery):
     await show_broadcasts(call.message)
@@ -1336,7 +1350,7 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.3.5 Admin Referral Analytics</b>\n"
+        "🤖 Версия CRM: <b>V3.3.6 Referral Admin Menu</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n"
         f"📊 Google Sheets: <b>{'подключен' if google_sheets_enabled() else 'не подключен'}</b>\n\n"
         "Следующий этап: Google Sheets 2.0 и отметка посещения.",
@@ -1391,7 +1405,7 @@ async def summary_job():
 
 
 async def main():
-    print("Starting Все свои CRM V3.3.5 Admin Referral Analytics", flush=True)
+    print("Starting Все свои CRM V3.3.6 Referral Admin Menu", flush=True)
     print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}", flush=True)
     print(f"Google Sheets configured: {'yes' if GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON else 'no'}", flush=True)
     init_db()
