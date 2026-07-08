@@ -467,6 +467,42 @@ def manage_kb(event_id, data=None):
     return kb.as_markup()
 
 
+
+
+def edit_event_kb(event_id, data=None):
+    kb = InlineKeyboardBuilder()
+    token = event_token(data, event_id) if data else (event_id if is_safe_token(event_id) else make_link_id(event_id))
+    kb.button(text="📝 Название", callback_data=f"edit:field:{token}:title")
+    kb.button(text="📅 Дата", callback_data=f"edit:field:{token}:date")
+    kb.button(text="🕕 Время", callback_data=f"edit:field:{token}:time")
+    kb.button(text="📄 Описание", callback_data=f"edit:field:{token}:description")
+    kb.button(text="💬 Чат участников", callback_data=f"edit:field:{token}:chat_url")
+    kb.button(text="📢 Канал сообщества", callback_data=f"edit:field:{token}:channel_url")
+    kb.button(text="⬅️ Назад", callback_data=f"event:manage:{token}")
+    kb.button(text="🏠 Главная", callback_data="crm:home")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+EDIT_FIELD_LABELS = {
+    "title": "название мероприятия",
+    "date": "дату мероприятия",
+    "time": "время мероприятия",
+    "description": "короткое описание",
+    "chat_url": "ссылку на чат участников",
+    "channel_url": "ссылку на канал сообщества",
+}
+
+
+EDIT_FIELD_ICONS = {
+    "title": "📝",
+    "date": "📅",
+    "time": "🕕",
+    "description": "📄",
+    "chat_url": "💬",
+    "channel_url": "📢",
+}
+
 def docs_kb(event_id, data=None):
     kb = InlineKeyboardBuilder()
     token = event_token(data, event_id) if data else (event_id if is_safe_token(event_id) else make_link_id(event_id))
@@ -502,6 +538,10 @@ class NewEvent(StatesGroup):
     description = State()
     chat_url = State()
     channel_url = State()
+
+
+class EditEvent(StatesGroup):
+    value = State()
 
 
 class Broadcast(StatesGroup):
@@ -1227,9 +1267,89 @@ async def cb_duplicate(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("manage:edit:"))
+async def cb_edit_event(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("Нет доступа")
+    token = call.data.split(":", 2)[2]
+    data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+    await call.message.answer(
+        "✏️ <b>Изменить мероприятие</b>\n\nВыберите, что нужно поправить:",
+        parse_mode="HTML",
+        reply_markup=edit_event_kb(event_id, data),
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("edit:field:"))
+async def cb_edit_event_field(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return await call.answer("Нет доступа")
+    try:
+        _, _, token, field = call.data.split(":", 3)
+    except ValueError:
+        return await call.answer("Ошибка данных")
+    if field not in EDIT_FIELD_LABELS:
+        return await call.answer("Поле не найдено")
+
+    data = load_data()
+    event_id = resolve_event_id(data, token)
+    if not event_id:
+        return await call.answer("Мероприятие не найдено")
+
+    current_value = data.get("events", {}).get(event_id, {}).get(field, "") or "—"
+    await state.update_data(edit_event_id=event_id, edit_field=field)
+    await call.message.answer(
+        f"{EDIT_FIELD_ICONS.get(field, '✏️')} Введите новое значение для поля <b>{EDIT_FIELD_LABELS[field]}</b>.\n\n"
+        f"Сейчас: <code>{escape(str(current_value))}</code>\n\n"
+        "Если нужно очистить поле — отправьте <code>-</code>.",
+        parse_mode="HTML",
+    )
+    await state.set_state(EditEvent.value)
+    await call.answer()
+
+
+@dp.message(EditEvent.value)
+async def edit_event_value(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    st = await state.get_data()
+    event_id = st.get("edit_event_id")
+    field = st.get("edit_field")
+    if not event_id or field not in EDIT_FIELD_LABELS:
+        await state.clear()
+        return await message.answer("Не удалось понять, какое поле редактируем. Откройте мероприятие заново.")
+
+    data = load_data()
+    event = data.get("events", {}).get(event_id)
+    if not event:
+        await state.clear()
+        return await message.answer("Мероприятие не найдено.")
+
+    raw_value = message.text.strip()
+    if field in ["chat_url", "channel_url"]:
+        value = normalize_tg_url(raw_value)
+    else:
+        value = "" if raw_value == "-" else raw_value
+
+    event[field] = value
+    event["updated_at"] = now_str()
+    save_data(data)
+    await state.clear()
+
+    await message.answer(
+        f"✅ Поле <b>{EDIT_FIELD_LABELS[field]}</b> обновлено.",
+        parse_mode="HTML",
+    )
+    await message.answer(event_card_text(data, event_id), parse_mode="HTML", reply_markup=event_card_kb(event_id, data))
+
+
 @dp.callback_query(F.data.startswith("manage:poster:"))
-async def cb_stub(call: CallbackQuery):
-    await call.message.answer("Функция будет добавлена в следующем обновлении.")
+async def cb_poster_stub(call: CallbackQuery):
+    await call.message.answer("Афишу добавим отдельным обновлением.")
     await call.answer()
 
 
@@ -1350,7 +1470,7 @@ async def show_system(message: Message):
     await message.answer(
         "⚙️ <b>Система</b>\n\n"
         f"📄 Версия документов: <b>{DOC_VERSION}</b>\n"
-        "🤖 Версия CRM: <b>V3.3.6 Referral Admin Menu</b>\n"
+        "🤖 Версия CRM: <b>V3.4 Event Edit</b>\n"
         f"💾 Хранилище: <b>{'PostgreSQL' if DATABASE_URL else 'JSON fallback'}</b>\n"
         f"📊 Google Sheets: <b>{'подключен' if google_sheets_enabled() else 'не подключен'}</b>\n\n"
         "Следующий этап: Google Sheets 2.0 и отметка посещения.",
@@ -1405,7 +1525,7 @@ async def summary_job():
 
 
 async def main():
-    print("Starting Все свои CRM V3.3.6 Referral Admin Menu", flush=True)
+    print("Starting Все свои CRM V3.4 Event Edit", flush=True)
     print(f"Storage mode: {'PostgreSQL' if DATABASE_URL else 'JSON fallback'}", flush=True)
     print(f"Google Sheets configured: {'yes' if GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON else 'no'}", flush=True)
     init_db()
